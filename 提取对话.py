@@ -2,15 +2,49 @@ import os
 import re
 
 
-def extract_text_from_rpy(file_path):
+def load_character_translations_from_file(file_path):
+    """
+    从文件中加载角色代码到中文名称的映射
+
+    Args:
+        file_path (str): 角色定义文件的路径
+
+    Returns:
+        dict: 角色代码到中文名称的映射字典
+    """
+    translation_dict = {}
+
+    try:
+        with open(file_path, 'r', encoding='utf-8') as f:
+            # 使用正则表达式提取角色定义
+            pattern = r'^([A-Za-z0-9_]+)\s*=\s*(.+)$'
+
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith('#'):  # 跳过空行和注释
+                    match = re.match(pattern, line)
+                    if match:
+                        character_code = match.group(1)
+                        chinese_name = match.group(2).strip()
+                        translation_dict[character_code] = chinese_name
+                        print(f"加载角色翻译: {character_code} -> {chinese_name}")
+
+    except Exception as e:
+        print(f"读取角色定义文件时出错: {e}")
+
+    return translation_dict
+
+
+def extract_text_from_rpy(file_path, translation_dict):
     """
     从.rpy文件中提取角色对话（包含角色代码）和旁白文本
 
     Args:
         file_path (str): .rpy文件的路径
+        translation_dict (dict): 角色代码到中文名称的映射字典
 
     Returns:
-        dict: 包含提取的对话（带角色代码）和旁白的字典
+        dict: 包含提取的对话（带角色中文名）和旁白的字典
     """
     # 正则表达式模式
     dialogue_pattern = r'^([A-Za-z_]+) "([^"]*)"'  # 角色对话模式，捕获角色代码和文本
@@ -29,7 +63,7 @@ def extract_text_from_rpy(file_path):
         r'^$'  # 空行
     ]
 
-    dialogues = []  # 格式: (角色代码, 文本)
+    dialogues = []  # 格式: (角色中文名, 文本)
     narrations = []  # 格式: 文本
 
     try:
@@ -49,7 +83,9 @@ def extract_text_from_rpy(file_path):
                     # 移除{}标签
                     cleaned_text = re.sub(r'\{[^}]*\}', '', dialogue_text)
                     if cleaned_text.strip():  # 确保不是空字符串
-                        dialogues.append((character_code, cleaned_text.strip()))
+                        # 将角色代码转换为中文名称
+                        character_name = translation_dict.get(character_code, character_code)
+                        dialogues.append((character_name, cleaned_text.strip()))
                     continue
 
                 # 检查是否为旁白
@@ -71,14 +107,15 @@ def extract_text_from_rpy(file_path):
     }
 
 
-def process_rpy_files(folder_path):
+def process_rpy_files(folder_path, translation_dict):
     """
     处理文件夹中的所有.rpy文件
 
     Args:
         folder_path (str): 文件夹路径
+        translation_dict (dict): 角色代码到中文名称的映射字典
     """
-    all_dialogues = []  # 格式: (角色代码, 文本)
+    all_dialogues = []  # 格式: (角色中文名, 文本)
     all_narrations = []  # 格式: 文本
 
     # 遍历文件夹中的所有文件
@@ -89,40 +126,19 @@ def process_rpy_files(folder_path):
                 print(f"处理文件: {file_path}")
 
                 # 提取文本
-                result = extract_text_from_rpy(file_path)
+                result = extract_text_from_rpy(file_path, translation_dict)
                 all_dialogues.extend(result["dialogues"])
                 all_narrations.extend(result["narrations"])
 
-    # 输出结果
-    print("\n=== 角色对话（带角色代码） ===")
-    for i, (character, dialogue) in enumerate(all_dialogues, 1):
-        print(f"{i}. [{character}] {dialogue}")
-
     print("\n=== 旁白 ===")
     for i, narration in enumerate(all_narrations, 1):
-        print(f"{i}. {narration}")
+        print(f"None:{narration}")
 
-    # 保存到文件
-    output_file = os.path.join(folder_path, 'extracted_text.txt')
-    with open(output_file, 'w', encoding='utf-8') as f:
-        f.write("=== 角色对话（带角色代码） ===\n")
-        for i, (character, dialogue) in enumerate(all_dialogues, 1):
-            f.write(f"{i}. [{character}] {dialogue}\n")
-
-        f.write("\n=== 旁白 ===\n")
-        for i, narration in enumerate(all_narrations, 1):
-            f.write(f"{i}. {narration}\n")
-
-    # 分别保存角色对话和旁白到不同的文件
-    dialogue_file = os.path.join(folder_path, 'dialogues_only.txt')
-    with open(dialogue_file, 'w', encoding='utf-8') as f:
-        for character, dialogue in all_dialogues:
-            f.write(f"{dialogue}\n")
-
-    narration_file = os.path.join(folder_path, 'narrations_only.txt')
+    # 保存旁白到文件
+    narration_file = os.path.join(folder_path, '旁白.txt')
     with open(narration_file, 'w', encoding='utf-8') as f:
         for narration in all_narrations:
-            f.write(f"{narration}\n")
+            f.write(f"None:{narration}\n")
 
     # 按角色分类统计
     character_stats = {}
@@ -133,10 +149,12 @@ def process_rpy_files(folder_path):
 
     # 保存按角色分类的对话
     for character, lines in character_stats.items():
-        char_file = os.path.join(folder_path, f'dialogue_{character}.txt')
+        # 创建安全的文件名
+        safe_filename = re.sub(r'[\\/*?:"<>|]', '_', character)
+        char_file = os.path.join(folder_path, f'dialogue_{safe_filename}.txt')
         with open(char_file, 'w', encoding='utf-8') as f:
-            for i, dialogue in enumerate(lines, 1):
-                f.write(f"{i}. {dialogue}\n")
+            for dialogue in lines:
+                f.write(f"{character}:{dialogue}\n")
 
     print(f"\n统计结果:")
     print(f"总对话条数: {len(all_dialogues)}")
@@ -147,19 +165,34 @@ def process_rpy_files(folder_path):
         print(f"  {character}: {len(lines)} 条")
 
     print(f"\n结果已保存到:")
-    print(f"  - 完整提取: {output_file}")
-    print(f"  - 纯对话文本: {dialogue_file}")
     print(f"  - 纯旁白文本: {narration_file}")
     for character in character_stats.keys():
-        print(f"  - {character} 的对话: dialogue_{character}.txt")
+        safe_filename = re.sub(r'[\\/*?:"<>|]', '_', character)
+        print(f"  - {character} 的对话: dialogue_{safe_filename}.txt")
 
 
 # 使用示例
 if __name__ == "__main__":
-    folder_path = r"C:\360极速浏览器X下载\仅机翻补丁-[CHS]BoundbyNight-0.17a-pc\game\tl\schinese\voice"
+    folder_path = r"C:\Users\Administrator\Downloads\bbn-vn-demo-pc\BoundbyNight-0.17a-pc\game\tl\schinese\scripts"
+    translation_file = r"C:\Users\Administrator\Downloads\bbn-vn-demo-pc\BoundbyNight-0.17a-pc\角色定义中文版.txt"
 
-    if os.path.exists(folder_path):
-        process_rpy_files(folder_path)
-    else:
+    # 检查文件是否存在
+    if not os.path.exists(translation_file):
+        print(f"角色定义文件不存在: {translation_file}")
+        print("请确保文件路径正确")
+        exit()
+
+    if not os.path.exists(folder_path):
         print(f"文件夹路径不存在: {folder_path}")
         print("请确保路径正确，或者使用绝对路径")
+        exit()
+
+    # 加载角色翻译
+    print("正在加载角色定义...")
+    translation_dict = load_character_translations_from_file(translation_file)
+
+    if translation_dict:
+        print(f"成功加载 {len(translation_dict)} 个角色定义")
+        process_rpy_files(folder_path, translation_dict)
+    else:
+        print("未能加载角色定义，请检查文件格式")

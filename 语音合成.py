@@ -1,6 +1,7 @@
 # 设置Tcl/Tk库路径（根据你的实际安装路径调整）
 import base64
 import re
+import hashlib  # 添加hashlib用于生成SHA1哈希
 
 tcl_library_path = "C:/Users/Administrator/AppData/Local/Programs/Python/Python313/tcl/tcl8.6"
 tk_library_path = "C:/Users/Administrator/AppData/Local/Programs/Python/Python313/tcl/tk8.6"
@@ -177,15 +178,6 @@ class TTSGeneratorGUI:
             model_name = self.model_var.get()
             speed_factor = self.speed_var.get()
 
-            # 获取输入文件名前缀
-            input_filename = os.path.basename(input_file)
-            if '_' in input_filename:
-                # 找到最后一个 _ 的位置
-                underscore_pos = input_filename.rfind('_')
-                # 提取 _ 后面的第一个字符
-                target_char = input_filename[underscore_pos + 1]
-                # 形成 X_ 格式
-                prefix = f"{target_char}_"
             # 读取文件
             with open(input_file, 'r', encoding='utf-8') as f:
                 lines = f.readlines()
@@ -197,7 +189,6 @@ class TTSGeneratorGUI:
             failed_count = 0
             skipped_count = 0
 
-            self.log_message(f"使用前缀: {prefix}")
             self.log_message(f"开始处理 {total_lines} 条对话")
             self.log_message(f"输出目录: {output_dir}")
             self.log_message("-" * 50)
@@ -219,19 +210,20 @@ class TTSGeneratorGUI:
                     self.skipped_var.set(str(skipped_count))
                     continue
 
-                # 移除行首的数字编号（如 "11. " 或 "12. "）
-                # 使用正则表达式匹配数字+点+空格的模式
-                processed_line = re.sub(r'^\d+\.\s*', '', original_line)
+                # 移除角色名称前缀（如"亚历克斯:"）
+                processed_line = re.sub(r'^[^:]+:\s*', '', original_line)
 
                 if not processed_line:
                     skipped_count += 1
                     self.skipped_var.set(str(skipped_count))
                     continue
 
-                # 生成Base64文件名（使用处理后的文本，不含编号）
-                text_encoded = self.text_to_filename(processed_line)
-                filename = f"{prefix}{text_encoded}.wav"
+                # 生成SHA1哈希文件名
+                sha1_hash = hashlib.sha1()
+                sha1_hash.update(original_line.encode('utf-8'))
+                filename = sha1_hash.hexdigest() + ".wav"
                 output_path = os.path.join(output_dir, filename)
+
                 # 检查文件是否已存在
                 if os.path.exists(output_path):
                     self.log_message(f"⏭️ 跳过已存在文件: {filename}")
@@ -239,7 +231,7 @@ class TTSGeneratorGUI:
                     self.skipped_var.set(str(skipped_count))
                     continue
 
-                # 生成TTS - 使用处理后的文本进行合成（不含编号）
+                # 生成TTS - 使用处理后的文本进行合成（不含角色名称）
                 self.log_message(f"[{i + 1}/{total_lines}] 原始: {original_line}")
                 self.log_message(f"       合成: {processed_line[:50]}...")
                 self.log_message(f"       文件名: {filename}")
@@ -272,27 +264,6 @@ class TTSGeneratorGUI:
             self.start_button.config(state=tk.NORMAL)
             self.stop_button.config(state=tk.DISABLED)
             self.is_processing = False
-
-    def text_to_filename(self, text):
-        """将文本转换为安全的文件名（用下划线替换所有标点符号）"""
-        # 创建一个正则表达式模式，匹配所有标点符号和特殊字符
-        pattern = r'[^\w\u4e00-\u9fff]'  # 匹配非字母数字和非中文字符
-
-        # 将所有标点符号替换为下划线
-        safe_name = re.sub(pattern, '_', text)
-
-        # 移除连续的下划线
-        safe_name = re.sub(r'_+', '_', safe_name)
-
-        # 移除开头和结尾的下划线
-        safe_name = safe_name.strip('_')
-
-        # 如果结果为空，使用默认名称
-        if not safe_name:
-            safe_name = 'text'
-
-        # 限制文件名长度（Windows文件名限制为255字符）
-        return safe_name[:200]  # 保留足够空间给前缀和后缀
 
 
 class TTSGenerator:
