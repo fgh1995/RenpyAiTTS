@@ -2,6 +2,7 @@
 import base64
 import re
 import hashlib  # 添加hashlib用于生成SHA1哈希
+import queue  # 添加队列用于多线程处理
 
 tcl_library_path = "C:/Users/Administrator/AppData/Local/Programs/Python/Python313/tcl/tcl8.6"
 tk_library_path = "C:/Users/Administrator/AppData/Local/Programs/Python/Python313/tcl/tk8.6"
@@ -24,11 +25,15 @@ class TTSGeneratorGUI:
     def __init__(self, root):
         self.root = root
         self.root.title("TTS语音合成工具")
-        self.root.geometry("800x600")
+        self.root.geometry("800x700")  # 增加窗口高度以容纳新控件
 
         self.tts_generator = TTSGenerator()
         self.is_processing = False
         self.stop_requested = False
+        self.task_queue = queue.Queue()
+        self.threads = []
+        self.processed_count = 0
+        self.lock = threading.Lock()
 
         self.setup_ui()
 
@@ -67,9 +72,15 @@ class TTSGeneratorGUI:
         speed_scale.grid(row=3, column=1, sticky=(tk.W, tk.E), pady=5)
         ttk.Label(main_frame, textvariable=self.speed_var).grid(row=3, column=2, sticky=tk.W, padx=(5, 0), pady=5)
 
+        # 线程数设置
+        ttk.Label(main_frame, text="线程数:").grid(row=4, column=0, sticky=tk.W, pady=5)
+        self.thread_count_var = tk.IntVar(value=3)  # 默认3个线程
+        thread_spinbox = ttk.Spinbox(main_frame, from_=1, to=10, textvariable=self.thread_count_var, width=10)
+        thread_spinbox.grid(row=4, column=1, sticky=tk.W, pady=5)
+
         # 控制按钮框架
         button_frame = ttk.Frame(main_frame)
-        button_frame.grid(row=4, column=0, columnspan=3, pady=10)
+        button_frame.grid(row=5, column=0, columnspan=3, pady=10)
 
         self.start_button = ttk.Button(button_frame, text="开始合成", command=self.start_processing)
         self.start_button.pack(side=tk.LEFT, padx=5)
@@ -78,19 +89,19 @@ class TTSGeneratorGUI:
         self.stop_button.pack(side=tk.LEFT, padx=5)
 
         # 进度条
-        ttk.Label(main_frame, text="进度:").grid(row=5, column=0, sticky=tk.W, pady=5)
+        ttk.Label(main_frame, text="进度:").grid(row=6, column=0, sticky=tk.W, pady=5)
         self.progress_var = tk.DoubleVar()
         self.progress_bar = ttk.Progressbar(main_frame, variable=self.progress_var, maximum=100)
-        self.progress_bar.grid(row=5, column=1, sticky=(tk.W, tk.E), pady=5)
+        self.progress_bar.grid(row=6, column=1, sticky=(tk.W, tk.E), pady=5)
 
         # 状态标签
         self.status_var = tk.StringVar(value="准备就绪")
         status_label = ttk.Label(main_frame, textvariable=self.status_var)
-        status_label.grid(row=6, column=0, columnspan=3, sticky=tk.W, pady=5)
+        status_label.grid(row=7, column=0, columnspan=3, sticky=tk.W, pady=5)
 
         # 统计信息
         stats_frame = ttk.Frame(main_frame)
-        stats_frame.grid(row=7, column=0, columnspan=3, sticky=(tk.W, tk.E), pady=5)
+        stats_frame.grid(row=8, column=0, columnspan=3, sticky=(tk.W, tk.E), pady=5)
 
         ttk.Label(stats_frame, text="成功:").pack(side=tk.LEFT)
         self.success_var = tk.StringVar(value="0")
@@ -108,16 +119,21 @@ class TTSGeneratorGUI:
         self.total_var = tk.StringVar(value="0")
         ttk.Label(stats_frame, textvariable=self.total_var).pack(side=tk.LEFT)
 
+        # 活动线程显示
+        ttk.Label(stats_frame, text="活动线程:").pack(side=tk.LEFT, padx=(20, 0))
+        self.active_threads_var = tk.StringVar(value="0")
+        ttk.Label(stats_frame, textvariable=self.active_threads_var).pack(side=tk.LEFT)
+
         # 日志输出
-        ttk.Label(main_frame, text="日志:").grid(row=8, column=0, sticky=tk.W, pady=5)
+        ttk.Label(main_frame, text="日志:").grid(row=9, column=0, sticky=tk.W, pady=5)
         self.log_text = scrolledtext.ScrolledText(main_frame, height=15, width=70)
-        self.log_text.grid(row=9, column=0, columnspan=3, sticky=(tk.W, tk.E, tk.N, tk.S), pady=5)
+        self.log_text.grid(row=10, column=0, columnspan=3, sticky=(tk.W, tk.E, tk.N, tk.S), pady=5)
 
         # 配置网格权重
         self.root.columnconfigure(0, weight=1)
         self.root.rowconfigure(0, weight=1)
         main_frame.columnconfigure(1, weight=1)
-        main_frame.rowconfigure(9, weight=1)
+        main_frame.rowconfigure(10, weight=1)
 
     def browse_input(self):
         filename = filedialog.askopenfilename(
@@ -138,6 +154,81 @@ class TTSGeneratorGUI:
         self.log_text.see(tk.END)
         self.root.update_idletasks()
 
+    def update_active_threads(self):
+        """更新活动线程计数"""
+        active_count = sum(1 for thread in self.threads if thread.is_alive())
+        self.active_threads_var.set(str(active_count))
+
+    def worker_thread(self, thread_id):
+        """工作线程函数"""
+        while not self.stop_requested:
+            try:
+                # 从队列中获取任务，设置超时时间
+                task = self.task_queue.get(timeout=1)
+                i, original_line, total_lines, output_dir, model_name, speed_factor = task
+
+                if self.stop_requested:
+                    break
+
+                # 处理行
+                processed_line = re.sub(r'^[^:]+:\s*', '', original_line.strip())
+
+                if not processed_line:
+                    with self.lock:
+                        self.skipped_var.set(str(int(self.skipped_var.get()) + 1))
+                    continue
+
+                # 生成SHA1哈希文件名
+                sha1_hash = hashlib.sha1()
+                sha1_hash.update(original_line.encode('utf-8'))
+                filename = sha1_hash.hexdigest() + ".wav"
+                output_path = os.path.join(output_dir, filename)
+
+                # 检查文件是否已存在
+                if os.path.exists(output_path):
+                    with self.lock:
+                        self.log_message(f"⏭️ 线程{thread_id}: 跳过已存在文件: {filename}")
+                        self.skipped_var.set(str(int(self.skipped_var.get()) + 1))
+                    continue
+
+                # 生成TTS
+                with self.lock:
+                    self.log_message(f"🧵 线程{thread_id}: [{i + 1}/{total_lines}] 处理: {processed_line[:50]}...")
+
+                if self.tts_generator.generate_tts(processed_line, output_path, model_name, speed_factor):
+                    with self.lock:
+                        self.success_var.set(str(int(self.success_var.get()) + 1))
+                        self.log_message(f"✅ 线程{thread_id}: 成功生成: {filename}")
+                else:
+                    with self.lock:
+                        self.failed_var.set(str(int(self.failed_var.get()) + 1))
+                        self.log_message(f"❌ 线程{thread_id}: 生成失败: {filename}")
+
+                # 更新进度
+                with self.lock:
+                    self.processed_count += 1
+                    progress = (self.processed_count / total_lines) * 100
+                    self.progress_var.set(progress)
+                    self.status_var.set(f"处理中: {self.processed_count}/{total_lines}")
+
+                # 标记任务完成
+                self.task_queue.task_done()
+
+                # 更新活动线程计数
+                self.update_active_threads()
+
+                # 添加短暂延迟以避免服务器过载
+                time.sleep(0.5)
+
+            except queue.Empty:
+                # 队列为空，退出线程
+                break
+            except Exception as e:
+                with self.lock:
+                    self.failed_var.set(str(int(self.failed_var.get()) + 1))
+                    self.log_message(f"❌ 线程{thread_id}: 发生错误: {str(e)}")
+                self.task_queue.task_done()
+
     def start_processing(self):
         if not self.input_path.get():
             messagebox.showerror("错误", "请选择输入文件")
@@ -150,33 +241,36 @@ class TTSGeneratorGUI:
         # 重置状态
         self.is_processing = True
         self.stop_requested = False
+        self.processed_count = 0
         self.success_var.set("0")
         self.failed_var.set("0")
         self.skipped_var.set("0")
         self.total_var.set("0")
         self.progress_var.set(0)
+        self.active_threads_var.set("0")
         self.log_text.delete(1.0, tk.END)
+
+        # 清空任务队列
+        while not self.task_queue.empty():
+            self.task_queue.get_nowait()
 
         # 更新UI状态
         self.start_button.config(state=tk.DISABLED)
         self.stop_button.config(state=tk.NORMAL)
-        self.status_var.set("正在处理...")
+        self.status_var.set("正在准备...")
 
         # 在新线程中处理
-        thread = threading.Thread(target=self.process_file)
+        thread = threading.Thread(target=self.prepare_and_process)
         thread.daemon = True
         thread.start()
 
-    def stop_processing(self):
-        self.stop_requested = True
-        self.status_var.set("正在停止...")
-
-    def process_file(self):
+    def prepare_and_process(self):
         try:
             input_file = self.input_path.get()
             output_dir = self.output_path.get()
             model_name = self.model_var.get()
             speed_factor = self.speed_var.get()
+            thread_count = self.thread_count_var.get()
 
             # 读取文件
             with open(input_file, 'r', encoding='utf-8') as f:
@@ -185,76 +279,36 @@ class TTSGeneratorGUI:
             total_lines = len(lines)
             self.total_var.set(str(total_lines))
 
-            success_count = 0
-            failed_count = 0
-            skipped_count = 0
+            # 填充任务队列
+            for i, line in enumerate(lines):
+                original_line = line.strip()
+                if original_line:  # 只添加非空行
+                    self.task_queue.put((i, original_line, total_lines, output_dir, model_name, speed_factor))
 
-            self.log_message(f"开始处理 {total_lines} 条对话")
+            self.log_message(f"开始处理 {total_lines} 条对话，使用 {thread_count} 个线程")
             self.log_message(f"输出目录: {output_dir}")
             self.log_message("-" * 50)
 
-            for i, line in enumerate(lines):
-                if self.stop_requested:
-                    self.log_message("用户请求停止处理")
-                    break
+            # 创建工作线程
+            self.threads = []
+            for i in range(thread_count):
+                thread = threading.Thread(target=self.worker_thread, args=(i + 1,))
+                thread.daemon = True
+                thread.start()
+                self.threads.append(thread)
 
-                # 更新进度
-                progress = (i + 1) / total_lines * 100
-                self.progress_var.set(progress)
-                self.status_var.set(f"处理中: {i + 1}/{total_lines}")
+            # 等待所有任务完成
+            self.task_queue.join()
 
-                # 处理行
-                original_line = line.strip()
-                if not original_line:
-                    skipped_count += 1
-                    self.skipped_var.set(str(skipped_count))
-                    continue
-
-                # 移除角色名称前缀（如"亚历克斯:"）
-                processed_line = re.sub(r'^[^:]+:\s*', '', original_line)
-
-                if not processed_line:
-                    skipped_count += 1
-                    self.skipped_var.set(str(skipped_count))
-                    continue
-
-                # 生成SHA1哈希文件名
-                sha1_hash = hashlib.sha1()
-                sha1_hash.update(original_line.encode('utf-8'))
-                filename = sha1_hash.hexdigest() + ".wav"
-                output_path = os.path.join(output_dir, filename)
-
-                # 检查文件是否已存在
-                if os.path.exists(output_path):
-                    self.log_message(f"⏭️ 跳过已存在文件: {filename}")
-                    skipped_count += 1
-                    self.skipped_var.set(str(skipped_count))
-                    continue
-
-                # 生成TTS - 使用处理后的文本进行合成（不含角色名称）
-                self.log_message(f"[{i + 1}/{total_lines}] 原始: {original_line}")
-                self.log_message(f"       合成: {processed_line[:50]}...")
-                self.log_message(f"       文件名: {filename}")
-
-                if self.tts_generator.generate_tts(processed_line, output_path, model_name, speed_factor):
-                    success_count += 1
-                    self.success_var.set(str(success_count))
-                else:
-                    failed_count += 1
-                    self.failed_var.set(str(failed_count))
-
-                time.sleep(1)
-
-            # 完成处理
-            self.is_processing = False
-            self.status_var.set("处理完成" if not self.stop_requested else "已停止")
-
-            self.log_message("\n" + "=" * 50)
-            self.log_message("处理完成!" if not self.stop_requested else "处理已停止!")
-            self.log_message(f"成功: {success_count}")
-            self.log_message(f"失败: {failed_count}")
-            self.log_message(f"跳过: {skipped_count}")
-            self.log_message(f"总计: {total_lines}")
+            # 检查是否被用户停止
+            if not self.stop_requested:
+                self.status_var.set("处理完成")
+                self.log_message("\n" + "=" * 50)
+                self.log_message("处理完成!")
+                self.log_message(f"成功: {self.success_var.get()}")
+                self.log_message(f"失败: {self.failed_var.get()}")
+                self.log_message(f"跳过: {self.skipped_var.get()}")
+                self.log_message(f"总计: {total_lines}")
 
         except Exception as e:
             self.log_message(f"处理过程中出错: {str(e)}")
@@ -264,6 +318,20 @@ class TTSGeneratorGUI:
             self.start_button.config(state=tk.NORMAL)
             self.stop_button.config(state=tk.DISABLED)
             self.is_processing = False
+            self.stop_requested = False
+
+    def stop_processing(self):
+        self.stop_requested = True
+        self.status_var.set("正在停止...")
+        self.log_message("正在停止所有线程...")
+
+        # 清空任务队列
+        while not self.task_queue.empty():
+            try:
+                self.task_queue.get_nowait()
+                self.task_queue.task_done()
+            except:
+                pass
 
 
 class TTSGenerator:
