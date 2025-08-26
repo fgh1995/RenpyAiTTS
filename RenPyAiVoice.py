@@ -4,6 +4,7 @@ import base64
 import hashlib
 import queue
 import threading
+import time
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, scrolledtext
 import requests
@@ -615,7 +616,7 @@ class TTSGeneratorTool:
             self.task_queue.get_nowait()
 
         # 更新UI状态
-        self.start_button.config(state=tk.DISABLED)
+        self.start_button.config(state=tk.NORMAL)
         self.stop_button.config(state=tk.NORMAL)
         self.tab3_status.set("正在准备...")
 
