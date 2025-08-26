@@ -573,10 +573,25 @@ class TTSGeneratorTool:
 
                 # 更新进度
                 with self.lock:
-                    self.processed_count += 1
-                    progress = (self.processed_count / total_lines) * 100
-                    self.progress_var.set(progress)
-                    self.tab3_status.set(f"处理中: {self.processed_count}/{total_lines}")
+                    try:
+                        # 将文本转换为整数并计算已处理的总数
+                        success_count = int(self.success_var.get())
+                        failed_count = int(self.failed_var.get())
+                        skipped_count = int(self.skipped_var.get())
+
+                        total_processed = success_count + failed_count + skipped_count
+                        self.processed_count = total_processed
+
+                        progress = (total_processed / total_lines) * 100
+                        self.progress_var.set(progress)
+                        self.tab3_status.set(f"处理中: {total_processed}/{total_lines}")
+
+                    except ValueError:
+                        # 如果转换失败，使用processed_count作为备选方案
+                        progress = (self.processed_count / total_lines) * 100
+                        self.progress_var.set(progress)
+                        self.tab3_status.set(f"处理中: {self.processed_count}/{total_lines}")
+                        self.log_message("警告: 计数转换错误，使用processed_count作为进度")
 
                 self.task_queue.task_done()
                 self.update_active_threads()
@@ -742,13 +757,13 @@ class TTSGenerator:
         }
 
         try:
-            response = requests.post(url, headers=self.headers, json=data, timeout=60)
+            response = requests.post(url, headers=self.headers, json=data, timeout=9999)
 
             if response.status_code == 200:
                 result = response.json()
                 if result.get("msg") == "合成成功":
                     audio_url = result.get("audio_url")
-                    audio_response = requests.get(audio_url, timeout=60)
+                    audio_response = requests.get(audio_url, timeout=9999)
                     if audio_response.status_code == 200:
                         os.makedirs(os.path.dirname(output_path), exist_ok=True)
                         with open(output_path, 'wb') as f:
