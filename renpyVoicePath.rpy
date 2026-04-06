@@ -1,3 +1,4 @@
+# 语音对话补丁
 init 999 python:
     import hashlib
     import os
